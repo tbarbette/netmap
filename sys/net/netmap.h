@@ -501,6 +501,14 @@ struct nmreq {
 	uint32_t	spare2[1];
 };
 
+struct nmbufreq {
+	uint32_t num;
+	uint32_t head;
+	u_int buf_size;
+	u_int buf_start;
+	u_int buf_end;
+};
+
 #define NR_REG_MASK		0xf /* values for nr_flags */
 enum {	NR_REG_DEFAULT	= 0,	/* backward compat, should not be used. */
 	NR_REG_ALL_NIC	= 1,
@@ -509,6 +517,7 @@ enum {	NR_REG_DEFAULT	= 0,	/* backward compat, should not be used. */
 	NR_REG_ONE_NIC	= 4,
 	NR_REG_PIPE_MASTER = 5,
 	NR_REG_PIPE_SLAVE = 6,
+	NR_REG_MULTIPLE_NIC = 7,
 };
 /* monitor uses the NR_REG to select the rings to monitor */
 #define NR_MONITOR_TX	0x100
@@ -526,6 +535,8 @@ enum {	NR_REG_DEFAULT	= 0,	/* backward compat, should not be used. */
 #define NIOCTXSYNC	_IO('i', 148) /* sync tx queues */
 #define NIOCRXSYNC	_IO('i', 149) /* sync rx queues */
 #define NIOCCONFIG	_IOWR('i',150, struct nm_ifreq) /* for ext. modules */
+#define NIOCALLOCBUF	_IO('i', 150) /*  alloc extra buffer */
+#define NIOCFREEBUF		_IO('i', 151) /* free extra buffer */
 #endif /* !NIOCREGIF */
 
 

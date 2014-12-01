@@ -916,6 +916,113 @@ ponger_body(void *data)
 	return NULL;
 }
 
+#ifndef NO_PCAP
+static void
+echo_pcap(u_char *user, const struct pcap_pkthdr * h,
+        const u_char * bytes)
+{
+        struct targ * targ = (struct targ *)user;
+
+        pcap_t *p = targ->g->p;
+	(void)p;
+	(void)bytes;
+	(void)h;
+	//D("%d",h->len);
+        pcap_inject(p, bytes, h->len);
+
+	targ -> count ++;
+
+
+}
+#endif /* !NO_PCAP */
+
+
+/*
+ * Echo all packets on RX to TX
+ */
+static void *
+echo_body(void *data)
+{
+        struct targ *targ = (struct targ *) data;
+       int i, rx = 0, sent = 0, n = targ->g->npackets;
+
+	D("Thread %d affinity %d",(int)targ->thread, targ->affinity);
+	setaffinity(targ->thread, targ->affinity);
+
+#ifndef NO_PCAP
+    if (targ->g->dev_type == DEV_PCAP) {
+	D("Using PCAP mode !");
+        while (!targ->cancel) {
+                pcap_dispatch(targ->g->p, targ->g->burst, echo_pcap,
+                        (u_char *)targ);
+        }
+    } else
+#endif /* !NO_PCAP */
+    {
+	struct pollfd pfd = { .fd = targ->fd, .events = POLLIN };
+        struct netmap_if *nifp = targ->nmd->nifp;
+        struct netmap_ring *txring, *rxring;
+
+        int synctx = 0;
+        while (n == 0 || sent < n) {
+                uint32_t txcur, txavail;
+//#define BUSYWAIT
+#ifdef BUSYWAIT
+                ioctl(pfd.fd, NIOCRXSYNC, NULL);
+#else
+                if (poll(&pfd, 1, 1000) <= 0) {
+                        D("poll error/timeout on queue %d: %s", targ->me,
+                                strerror(errno));
+                        continue;
+                }
+#endif
+//		D("Threads %d to %d",targ->nmd->first_rx_ring,targ->nmd->last_rx_ring);                
+                /* see what we got back */
+                for (i = targ->nmd->first_rx_ring; i <= targ->nmd->last_rx_ring; i++) {
+			synctx = 0;
+                        rxring = NETMAP_RXRING(nifp, i);
+			txring = NETMAP_TXRING(nifp, i);
+			txcur = txring->cur;
+	                txavail = nm_ring_space(txring);
+                        while (!nm_ring_empty(rxring) && txavail > 0) {
+                                uint32_t cur = rxring->cur;
+                                struct netmap_slot *slot = &rxring->slot[cur];
+                                
+				rxring->head = rxring->cur = nm_ring_next(rxring, cur);
+                                rx++;
+
+/*                                if (txavail == 0)
+                                        continue;*/
+				uint32_t idx = txring->slot[txcur].buf_idx;
+				txring->slot[txcur].buf_idx = slot->buf_idx;
+				slot->buf_idx = idx;
+                                txring->slot[txcur].len = slot->len;
+				txring->slot[txcur].flags |= NS_BUF_CHANGED;
+				slot->flags |= NS_BUF_CHANGED;
+                               
+                                txcur = nm_ring_next(txring, txcur);
+                                txavail--;
+                                sent++;
+				synctx++;
+                        }
+                	
+                	txring->head = txring->cur = txcur;	
+			if (synctx > 8 || txavail <= 8) {
+				ioctl(targ->nmd->fd, NIOCTXSYNC, NULL);
+			}
+		}
+
+                targ->count = sent;
+#ifdef BUSYWAIT
+                ioctl(pfd.fd, NIOCTXSYNC, NULL);
+#endif
+                //D("tx %d rx %d", sent, rx);
+        }
+    }
+        return NULL;
+}
+
+
 static __inline int
 timespec_ge(const struct timespec *a, const struct timespec *b)
 {
@@ -1311,7 +1418,7 @@ usage(void)
 		"Usage:\n"
 		"%s arguments\n"
 		"\t-i interface		interface name\n"
-		"\t-f function		tx rx ping pong\n"
+		"\t-f function		tx rx ping pong echo\n"
 		"\t-n count		number of iterations (can be 0)\n"
 		"\t-t pkts_to_send		also forces tx mode\n"
 		"\t-r pkts_to_receive	also forces rx mode\n"
@@ -1503,6 +1610,7 @@ static struct sf func[] = {
 	{ "rx",	receiver_body },
 	{ "ping",	pinger_body },
 	{ "pong",	ponger_body },
+	{ "echo",	echo_body },
 	{ NULL, NULL }
 };
 

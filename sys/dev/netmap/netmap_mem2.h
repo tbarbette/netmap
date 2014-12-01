@@ -120,6 +120,8 @@ extern struct netmap_mem_d nm_mem;
 struct lut_entry* netmap_mem_get_lut(struct netmap_mem_d *);
 u_int      netmap_mem_get_buftotal(struct netmap_mem_d *);
 size_t     netmap_mem_get_bufsize(struct netmap_mem_d *);
+u_int      netmap_mem_get_bufstart(struct netmap_mem_d *nmd);
+u_int      netmap_mem_get_bufend(struct netmap_mem_d *nmd);
 vm_paddr_t netmap_mem_ofstophys(struct netmap_mem_d *, vm_ooffset_t);
 int	   netmap_mem_finalize(struct netmap_mem_d *, struct netmap_adapter *);
 int 	   netmap_mem_init(void);
@@ -140,6 +142,7 @@ void	   netmap_mem_private_delete(struct netmap_mem_d *);
 #define NETMAP_MEM_IO		0x4	/* the underlying memory is mmapped I/O */
 
 uint32_t netmap_extra_alloc(struct netmap_adapter *, uint32_t *, uint32_t n);
+void netmap_extra_free(struct netmap_adapter *, uint32_t);
 
 
 #endif

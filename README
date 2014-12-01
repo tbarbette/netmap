@@ -1,3 +1,8 @@
+This is a version of the original netmap "next branch" with some
+ corrections and the possibility to make a syscall to get free
+ extra buffers, not tied to any interface.
+
+========================================================================
 	    Netmap - a framework for fast packet I/O
 	VALE -  a Virtual Local Ethernet using the netmap API
 ========================================================================
