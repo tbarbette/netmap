@@ -2283,23 +2283,18 @@ netmap_ioctl(struct cdev *dev, u_long cmd, caddr_t data,
 
 	default:	/* allow device-specific ioctls */
 	    {
-		struct socket so;
-		struct ifnet *ifp;
+		struct ifnet *ifp = ifunit_ref(nmr->nr_name);
+		if (ifp == NULL) {
+			error = ENXIO;
+		} else {
+			struct socket so;
 
-		bzero(&so, sizeof(so));
-		NMG_LOCK();
-		error = netmap_get_na(nmr, &na, 0 /* don't create */); /* keep reference */
-		if (error) {
-			netmap_adapter_put(na);
-			NMG_UNLOCK();
-			break;
+			bzero(&so, sizeof(so));
+			so.so_vnet = ifp->if_vnet;
+			// so->so_proto not null.
+			error = ifioctl(&so, cmd, data, td);
+			if_rele(ifp);
 		}
-		ifp = na->ifp;
-		so.so_vnet = ifp->if_vnet;
-		// so->so_proto not null.
-		error = ifioctl(&so, cmd, data, td);
-		netmap_adapter_put(na);
-		NMG_UNLOCK();
 		break;
 	    }
 
@@ -3121,8 +3116,13 @@ netmap_init(void)
 	error = netmap_mem_init();
 	if (error != 0)
 		goto fail;
-	/* XXX could use make_dev_credv() to get error number */
-	netmap_dev = make_dev(&netmap_cdevsw, 0, UID_ROOT, GID_WHEEL, 0660,
+	/*
+	 * MAKEDEV_ETERNAL_KLD avoids an expensive check on syscalls
+	 * when the module is compiled in.
+	 * XXX could use make_dev_credv() to get error number
+	 */
+	netmap_dev = make_dev_credf(MAKEDEV_ETERNAL_KLD,
+		&netmap_cdevsw, 0, NULL, UID_ROOT, GID_WHEEL, 0600,
 			      "netmap");
 	if (!netmap_dev)
 		goto fail;
