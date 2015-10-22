@@ -512,6 +512,14 @@ struct nmreq {
 	uint32_t	spare2[1];
 };
 
+struct nmbufreq {
+	uint32_t num;
+	uint32_t head;
+	u_int buf_size;
+	u_int buf_start;
+	u_int buf_end;
+};
+
 #define NR_REG_MASK		0xf /* values for nr_flags */
 enum {	NR_REG_DEFAULT	= 0,	/* backward compat, should not be used. */
 	NR_REG_ALL_NIC	= 1,
@@ -585,6 +593,8 @@ typedef struct _POLL_REQUEST_DATA {
 #define NIOCTXSYNC	_IO('i', 148) /* sync tx queues */
 #define NIOCRXSYNC	_IO('i', 149) /* sync rx queues */
 #define NIOCCONFIG	_IOWR('i',150, struct nm_ifreq) /* for ext. modules */
+#define NIOCALLOCBUF	_IO('i', 151) /*  alloc extra buffer */
+#define NIOCFREEBUF		_IO('i', 152) /* free extra buffer */
 #endif /* !NIOCREGIF */
 
 

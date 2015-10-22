@@ -67,7 +67,7 @@ MALLOC_DEFINE(M_NETMAP, "netmap", "Network memory map");
 #ifdef _WIN32_USE_SMALL_GENERIC_DEVICES_MEMORY
 #define NETMAP_BUF_MAX_NUM  8*4096      /* if too big takes too much time to allocate */
 #else
-#define NETMAP_BUF_MAX_NUM 20*4096*2	/* large machine */
+#define NETMAP_BUF_MAX_NUM 80*4096*2   /* large machine */
 #endif
 
 #define NETMAP_POOL_MAX_NAMSZ	32
@@ -880,15 +880,37 @@ netmap_obj_free_va(struct netmap_obj_pool *p, void *vaddr)
     (netmap_obj_offset(&(n)->pools[NETMAP_BUF_POOL], (v)) / NETMAP_BDG_BUF_SIZE(n))
 #endif
 
+size_t netmap_mem_get_bufsize(struct netmap_mem_d* nmd) {
+    return netmap_mem_bufsize(nmd);
+}
+
+u_int
+netmap_mem_get_bufstart(struct netmap_mem_d *nmd)
+{
+	return nmd->pools[NETMAP_IF_POOL].memtotal + nmd->pools[NETMAP_RING_POOL].memtotal;
+}
+
+u_int
+netmap_mem_get_bufend(struct netmap_mem_d *nmd)
+{
+	return nmd->pools[NETMAP_IF_POOL].memtotal + nmd->pools[NETMAP_RING_POOL].memtotal + nmd->pools[NETMAP_BUF_POOL].memtotal;
+}
+
 /*
  * allocate extra buffers in a linked list.
  * returns the actual number.
+ * If na is null, it will be allocated from the global region
  */
 uint32_t
 netmap_extra_alloc(struct netmap_adapter *na, uint32_t *head, uint32_t n)
 {
-	struct netmap_mem_d *nmd = na->nm_mem;
+	struct netmap_mem_d *nmd;
 	uint32_t i, pos = 0; /* opaque, scan position in the bitmap */
+
+	if (na != NULL)
+		nmd = na->nm_mem;
+	else
+		nmd = &nm_mem;
 
 	NMA_LOCK(nmd);
 
@@ -910,13 +932,23 @@ netmap_extra_alloc(struct netmap_adapter *na, uint32_t *head, uint32_t n)
 	return i;
 }
 
-static void
+void
 netmap_extra_free(struct netmap_adapter *na, uint32_t head)
 {
-        struct lut_entry *lut = na->na_lut.lut;
-	struct netmap_mem_d *nmd = na->nm_mem;
-	struct netmap_obj_pool *p = &nmd->pools[NETMAP_BUF_POOL];
+	struct lut_entry *lut;
+	struct netmap_mem_d *nmd;
+	struct netmap_obj_pool *p;
 	uint32_t i, cur, *buf;
+
+	if (na != NULL) {
+		nmd = na->nm_mem;
+		lut = na->na_lut.lut;
+	} else {
+		nmd = &nm_mem;
+		lut = nm_mem.pools[NETMAP_BUF_POOL].lut;
+	}
+
+	p = &nmd->pools[NETMAP_BUF_POOL];
 
 	D("freeing the extra list");
 	for (i = 0; head >=2 && head < p->objtotal; i++) {
