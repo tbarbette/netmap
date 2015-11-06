@@ -360,6 +360,7 @@ struct netmap_kring {
 
 	uint32_t	nr_hwcur;
 	uint32_t	nr_hwtail;
+	volatile uint32_t        nr_hwtailwb;
 
 	/*
 	 * Copies of values in user rings, so we do not need to look

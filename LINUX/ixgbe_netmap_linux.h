@@ -229,46 +229,14 @@ ixgbe_netmap_txsync(struct netmap_kring *kring, int flags)
 	 * Because this is expensive (we read a NIC register etc.)
 	 * we only do it in specific cases (see below).
 	 */
-	if (flags & NAF_FORCE_RECLAIM) {
-		reclaim_tx = 1; /* forced reclaim */
-	} else if (!nm_kr_txempty(kring)) {
-		reclaim_tx = 0; /* have buffers, no reclaim */
-	} else {
-		/*
-		 * No buffers available. Locate previous slot with
-		 * REPORT_STATUS set.
-		 * If the slot has DD set, we can reclaim space,
-		 * otherwise wait for the next interrupt.
-		 * This enables interrupt moderation on the tx
-		 * side though it might reduce throughput.
-		 */
-		union ixgbe_adv_tx_desc *txd = NM_IXGBE_TX_DESC(txr, 0);
-
-		nic_i = txr->next_to_clean + report_frequency;
-		if (nic_i > lim)
-			nic_i -= lim + 1;
-		// round to the closest with dd set
-		nic_i = (nic_i < kring->nkr_num_slots / 4 ||
-			 nic_i >= kring->nkr_num_slots*3/4) ?
-			0 : report_frequency;
-		reclaim_tx = txd[nic_i].wb.status & IXGBE_TXD_STAT_DD;	// XXX cpu_to_le32 ?
+    if (flags & NAF_FORCE_RECLAIM) {
+        reclaim_tx = 1;
+    } else if ((kring->nr_kflags & NKR_PENDINTR) != 0) {
+        reclaim_tx = 1; /* forced reclaim */
+        kring->nr_kflags &= ~NKR_PENDINTR;
 	}
 	if (reclaim_tx) {
-		/*
-		 * Record completed transmissions.
-		 * We (re)use the driver's txr->next_to_clean to keep
-		 * track of the most recently completed transmission.
-		 *
-		 * The datasheet discourages the use of TDH to find
-		 * out the number of sent packets, but we only set
-		 * REPORT STATUS in a few slots so TDH is the only
-		 * good way.
-		 */
-		nic_i = IXGBE_READ_REG(&adapter->hw, IXGBE_TDH(ring_nr));
-		if (nic_i >= kring->nkr_num_slots) { /* XXX can it happen ? */
-			D("TDH wrap %d", nic_i);
-			nic_i -= kring->nkr_num_slots;
-		}
+        nic_i = kring->nr_hwtailwb;
 		txr->next_to_clean = nic_i;
 		kring->nr_hwtail = nm_prev(netmap_idx_n2k(kring, nic_i), lim);
 	}
@@ -406,7 +374,24 @@ ring_reset:
 	return netmap_ring_reinit(kring);
 }
 
+static int
+ixgbe_netmap_preconfigure_tx_ring(struct SOFTC_T *adapter, struct ixgbe_ring* ring, int ring_nr, u32* txdctl)
+{
+    struct ixgbe_hw *hw = &adapter->hw;
+    struct netmap_adapter *na = NA(adapter->netdev);
 
+    //XXX Use dma_map_single? Could be needed in virtualized env
+    uint64_t tdwba = (uint64_t)virt_to_phys(&na->tx_rings[ring_nr].nr_hwtailwb);
+
+    tdwba |= IXGBE_TDWBAL_HEAD_WB_ENABLE;
+    IXGBE_WRITE_REG(hw, IXGBE_TDWBAL(ring_nr), tdwba & DMA_32BIT_MASK);
+    IXGBE_WRITE_REG(hw, IXGBE_TDWBAH(ring_nr), (tdwba >> 32));
+
+    //Reset WTRESH
+    *txdctl &= 0xff00ffff;
+//    *txdctl |= (8  << 16);
+    return 1;
+}
 /*
  * if in netmap mode, attach the netmap buffers to the ring and return true.
  * Otherwise return false.

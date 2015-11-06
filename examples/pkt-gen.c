@@ -1202,7 +1202,7 @@ echo_body(void *data)
 			}
 		}
 
-                targ->count = sent;
+                targ->ctr.pkts = sent;
 #ifdef BUSYWAIT
                 ioctl(pfd.fd, NIOCTXSYNC, NULL);
 #endif
