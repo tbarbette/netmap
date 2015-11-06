@@ -142,11 +142,18 @@
 /*
  * struct netmap_slot is a buffer descriptor
  */
+#define NETMAP_WITH_HASH 1
 struct netmap_slot {
 	uint32_t buf_idx;	/* buffer index */
 	uint16_t len;		/* length for this slot */
 	uint16_t flags;		/* buf changed, etc. */
-	uint64_t ptr;		/* pointer for indirect buffers */
+    union {
+        struct {
+        uint32_t rule_id;
+        uint32_t hash;
+        };
+    uint64_t ptr;		/* pointer for indirect buffers */
+    };
 };
 
 /*

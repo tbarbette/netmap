@@ -346,6 +346,8 @@ ixgbe_netmap_rxsync(struct netmap_kring *kring, int flags)
 			ring->slot[nm_i].len = le16toh(curr->wb.upper.length);
 			ring->slot[nm_i].flags = (!(staterr & IXGBE_RXD_STAT_EOP) ? NS_MOREFRAG |
 										slot_flags:slot_flags);
+			ring->slot[nm_i].hash = curr->wb.lower.hi_dword.rss;
+			ring->slot[nm_i].hash = curr->wb.lower.lo_dword.data;
 			nm_i = nm_next(nm_i, lim);
 			nic_i = nm_next(nic_i, lim);
 		}
