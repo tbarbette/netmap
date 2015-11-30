@@ -400,7 +400,7 @@ ixgbe_netmap_preconfigure_tx_ring(struct SOFTC_T *adapter, struct ixgbe_ring* ri
     uint64_t tdwba = (uint64_t)virt_to_phys(&na->tx_rings[ring_nr].nr_hwtailwb);
 
     tdwba |= IXGBE_TDWBAL_HEAD_WB_ENABLE;
-    IXGBE_WRITE_REG(hw, IXGBE_TDWBAL(ring_nr), tdwba & DMA_32BIT_MASK);
+    IXGBE_WRITE_REG(hw, IXGBE_TDWBAL(ring_nr), tdwba & DMA_BIT_MASK(32));
     IXGBE_WRITE_REG(hw, IXGBE_TDWBAH(ring_nr), (tdwba >> 32));
 
     //Reset WTRESH

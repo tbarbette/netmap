@@ -59,6 +59,17 @@ index 67b02bd..b6b74d8 100644
  	while (likely(total_rx_packets < budget)) {
  		union ixgbe_adv_rx_desc *rx_desc;
  		struct sk_buff *skb;
+@@ -3120,6 +3159,10 @@ void ixgbe_configure_rx_ring(struct ixgbe_adapter *adapter,
+
+	clear_bit(__IXGBE_HANG_CHECK_ARMED, &ring->state);
+
++	#ifdef DEV_NETMAP
++	ixgbe_netmap_preconfigure_tx_ring(adapter, ring, reg_idx, &txdctl);
++	#endif /* DEV_NETMAP */
++
+	/* enable queue */
+	IXGBE_WRITE_REG(hw, IXGBE_TXDCTL(reg_idx), txdctl);
+
 @@ -3049,6 +3085,9 @@ void ixgbe_configure_tx_ring(struct ixgbe_adapter *adapter,
  	} while (--wait_loop && !(txdctl & IXGBE_TXDCTL_ENABLE));
  	if (!wait_loop)
@@ -69,7 +80,7 @@ index 67b02bd..b6b74d8 100644
  }
  
  static void ixgbe_setup_mtqc(struct ixgbe_adapter *adapter)
-@@ -3483,6 +3522,10 @@ void ixgbe_configure_rx_ring(struct ixgbe_adapter *adapter,
+@@ -3483,6 +3526,10 @@
  	IXGBE_WRITE_REG(hw, IXGBE_RXDCTL(reg_idx), rxdctl);
  
  	ixgbe_rx_desc_queue_enable(adapter, ring);
@@ -80,7 +91,7 @@ index 67b02bd..b6b74d8 100644
  	ixgbe_alloc_rx_buffers(ring, ixgbe_desc_unused(ring));
  }
  
-@@ -4805,6 +4848,9 @@ static void ixgbe_up_complete(struct ixgbe_adapter *adapter)
+@@ -4805,6 +4852,9 @@ static void ixgbe_up_complete(struct ixgbe_adapter *adapter)
  			e_crit(drv, "Fan has stopped, replace the adapter\n");
  	}
  
@@ -90,7 +101,7 @@ index 67b02bd..b6b74d8 100644
  	/* bring the link up in the watchdog, this could race with our first
  	 * link up interrupt but shouldn't be a problem */
  	adapter->flags |= IXGBE_FLAG_NEED_LINK_UPDATE;
-@@ -5627,6 +5673,7 @@ static int ixgbe_open(struct net_device *netdev)
+@@ -5627,6 +5677,7 @@ static int ixgbe_open(struct net_device *netdev)
  
  	ixgbe_up_complete(adapter);
  
@@ -98,7 +109,7 @@ index 67b02bd..b6b74d8 100644
  	return 0;
  
  err_set_queues:
-@@ -8521,6 +8568,10 @@ skip_sriov:
+@@ -8521,6 +8572,10 @@ skip_sriov:
  			IXGBE_LINK_SPEED_10GB_FULL | IXGBE_LINK_SPEED_1GB_FULL,
  			true);
  
@@ -109,7 +120,7 @@ index 67b02bd..b6b74d8 100644
  	return 0;
  
  err_register:
-@@ -8564,6 +8615,11 @@ static void ixgbe_remove(struct pci_dev *pdev)
+@@ -8564,6 +8619,11 @@ static void ixgbe_remove(struct pci_dev *pdev)
  		return;
  
  	netdev  = adapter->netdev;
