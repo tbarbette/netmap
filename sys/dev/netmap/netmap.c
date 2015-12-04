@@ -104,7 +104,7 @@ Within the kernel, access to the netmap rings is protected as follows:
 
 --- VALE SWITCH ---
 
-NMG_LOCK() serializes all modifications to switches and ports.
+nNMG_LOCK() serializes all modifications to switches and ports.
 A switch cannot be deleted until all ports are gone.
 
 For each switch, an SX lock (RWlock on linux) protects
@@ -3119,8 +3119,9 @@ netmap_common_irq(struct ifnet *ifp, u_int q, u_int *work_done)
 
 	kring = NMR(na, t) + q;
 
+	kring->nr_kflags |= NKR_PENDINTR;	// XXX atomic ?
+
 	if (t == NR_RX) {
-		kring->nr_kflags |= NKR_PENDINTR;	// XXX atomic ?
 		*work_done = 1; /* do not fire napi again */
 	}
 	kring->nm_notify(kring, 0);
