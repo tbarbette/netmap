@@ -1491,6 +1491,20 @@ netmap_unget_na(struct netmap_adapter *na, struct ifnet *ifp)
 }
 
 
+#define NM_FAIL_ON(t) do {						\
+	if (unlikely(t)) {						\
+		RD(5, "%s: fail '" #t "' "				\
+			"h %d c %d t %d "				\
+			"rh %d rc %d rt %d "				\
+			"hc %d ht %d",					\
+			kring->name,					\
+			head, cur, ring->tail,				\
+			kring->rhead, kring->rcur, kring->rtail,	\
+			kring->nr_hwcur, kring->nr_hwtail);		\
+		return kring->nkr_num_slots;				\
+	}								\
+} while (0)
+
 /*
  * validate parameters on entry for *_txsync()
  * Returns ring->cur if ok, or something >= kring->nkr_num_slots
@@ -1507,7 +1521,6 @@ netmap_unget_na(struct netmap_adapter *na, struct ifnet *ifp)
 u_int
 nm_txsync_prologue(struct netmap_kring *kring, struct netmap_ring *ring)
 {
-#define NM_ASSERT(t) if (t) { D("fail " #t); goto error; }
 	u_int head = ring->head; /* read only once */
 	u_int cur = ring->cur; /* read only once */
 	u_int n = kring->nkr_num_slots;
@@ -1517,35 +1530,34 @@ nm_txsync_prologue(struct netmap_kring *kring, struct netmap_ring *ring)
 		kring->nr_hwcur, kring->nr_hwtail,
 		ring->head, ring->cur, ring->tail);
 #if 1 /* kernel sanity checks; but we can trust the kring. */
-	if (kring->nr_hwcur >= n || kring->rhead >= n ||
-	    kring->rtail >= n ||  kring->nr_hwtail >= n)
-		goto error;
+	NM_FAIL_ON(kring->nr_hwcur >= n || kring->rhead >= n ||
+	    kring->rtail >= n ||  kring->nr_hwtail >= n);
 #endif /* kernel sanity checks */
 	/*
-	 * user sanity checks. We only use 'cur',
-	 * A, B, ... are possible positions for cur:
+	 * user sanity checks. We only use head,
+	 * A, B, ... are possible positions for head:
 	 *
-	 *  0    A  cur   B  tail  C  n-1
-	 *  0    D  tail  E  cur   F  n-1
+	 *  0    A  rhead   B  rtail   C  n-1
+	 *  0    D  rtail   E  rhead   F  n-1
 	 *
 	 * B, F, D are valid. A, C, E are wrong
 	 */
 	if (kring->rtail >= kring->rhead) {
 		/* want rhead <= head <= rtail */
-		NM_ASSERT(head < kring->rhead || head > kring->rtail);
+		NM_FAIL_ON(head < kring->rhead || head > kring->rtail);
 		/* and also head <= cur <= rtail */
-		NM_ASSERT(cur < head || cur > kring->rtail);
+		NM_FAIL_ON(cur < head || cur > kring->rtail);
 	} else { /* here rtail < rhead */
 		/* we need head outside rtail .. rhead */
-		NM_ASSERT(head > kring->rtail && head < kring->rhead);
+		NM_FAIL_ON(head > kring->rtail && head < kring->rhead);
 
 		/* two cases now: head <= rtail or head >= rhead  */
 		if (head <= kring->rtail) {
 			/* want head <= cur <= rtail */
-			NM_ASSERT(cur < head || cur > kring->rtail);
+			NM_FAIL_ON(cur < head || cur > kring->rtail);
 		} else { /* head >= rhead */
 			/* cur must be outside rtail..head */
-			NM_ASSERT(cur > kring->rtail && cur < head);
+			NM_FAIL_ON(cur > kring->rtail && cur < head);
 		}
 	}
 	if (ring->tail != kring->rtail) {
@@ -1556,15 +1568,6 @@ nm_txsync_prologue(struct netmap_kring *kring, struct netmap_ring *ring)
 	kring->rhead = head;
 	kring->rcur = cur;
 	return head;
-
-error:
-	RD(5, "%s kring error: head %d cur %d tail %d rhead %d rcur %d rtail %d hwcur %d hwtail %d",
-		kring->name,
-		head, cur, ring->tail,
-		kring->rhead, kring->rcur, kring->rtail,
-		kring->nr_hwcur, kring->nr_hwtail);
-	return n;
-#undef NM_ASSERT
 }
 
 
@@ -1599,30 +1602,24 @@ nm_rxsync_prologue(struct netmap_kring *kring, struct netmap_ring *ring)
 	cur = kring->rcur = ring->cur;	/* read only once */
 	head = kring->rhead = ring->head;	/* read only once */
 #if 1 /* kernel sanity checks */
-	if (kring->nr_hwcur >= n || kring->nr_hwtail >= n)
-		goto error;
+	NM_FAIL_ON(kring->nr_hwcur >= n || kring->nr_hwtail >= n);
 #endif /* kernel sanity checks */
 	/* user sanity checks */
 	if (kring->nr_hwtail >= kring->nr_hwcur) {
 		/* want hwcur <= rhead <= hwtail */
-		if (head < kring->nr_hwcur || head > kring->nr_hwtail)
-			goto error;
+		NM_FAIL_ON(head < kring->nr_hwcur || head > kring->nr_hwtail);
 		/* and also rhead <= rcur <= hwtail */
-		if (cur < head || cur > kring->nr_hwtail)
-			goto error;
+		NM_FAIL_ON(cur < head || cur > kring->nr_hwtail);
 	} else {
 		/* we need rhead outside hwtail..hwcur */
-		if (head < kring->nr_hwcur && head > kring->nr_hwtail)
-			goto error;
+		NM_FAIL_ON(head < kring->nr_hwcur && head > kring->nr_hwtail);
 		/* two cases now: head <= hwtail or head >= hwcur  */
 		if (head <= kring->nr_hwtail) {
 			/* want head <= cur <= hwtail */
-			if (cur < head || cur > kring->nr_hwtail)
-				goto error;
+			NM_FAIL_ON(cur < head || cur > kring->nr_hwtail);
 		} else {
 			/* cur must be outside hwtail..head */
-			if (cur < head && cur > kring->nr_hwtail)
-				goto error;
+			NM_FAIL_ON(cur < head && cur > kring->nr_hwtail);
 		}
 	}
 	if (ring->tail != kring->rtail) {
@@ -1632,15 +1629,7 @@ nm_rxsync_prologue(struct netmap_kring *kring, struct netmap_ring *ring)
 		ring->tail = kring->rtail;
 	}
 	return head;
-
-error:
-	RD(5, "kring error: hwcur %d rcur %d hwtail %d head %d cur %d tail %d",
-		kring->nr_hwcur,
-		kring->rcur, kring->nr_hwtail,
-		kring->rhead, kring->rcur, ring->tail);
-	return n;
 }
-
 
 /*
  * Error routine called when txsync/rxsync detects an error.
@@ -1976,9 +1965,8 @@ netmap_rel_exclusive(struct netmap_priv_d *priv)
  * (put the adapter in netmap mode)
  *
  * 	This may be one of the following:
- * 	(XXX these should be either all *_register or all *_reg 2014-03-15)
  *
- * 	* netmap_hw_register				(hw ports)
+ * 	* netmap_hw_reg				        (hw ports)
  * 		checks that the ifp is still there, then calls
  * 		the hardware specific callback;
  *
@@ -1996,7 +1984,7 @@ netmap_rel_exclusive(struct netmap_priv_d *priv)
  *		intercept the sync callbacks of the monitored
  *		rings
  *
- *	* netmap_bwrap_register				(bwraps)
+ *	* netmap_bwrap_reg				(bwraps)
  *		cross-link the bwrap and hwna rings,
  *		forward the request to the hwna, override
  *		the hwna notify callback (to get the frames
@@ -2120,41 +2108,23 @@ err:
 	return error;
 }
 
-
 /*
- * update kring and ring at the end of txsync.
+ * update kring and ring at the end of rxsync/txsync.
  */
 static inline void
-nm_txsync_finalize(struct netmap_kring *kring)
+nm_sync_finalize(struct netmap_kring *kring)
 {
-	/* update ring tail to what the kernel knows */
+	/*
+	 * Update ring tail to what the kernel knows
+	 * After txsync: head/rhead/hwcur might be behind cur/rcur
+	 * if no carrier.
+	 */
 	kring->ring->tail = kring->rtail = kring->nr_hwtail;
 
-	/* note, head/rhead/hwcur might be behind cur/rcur
-	 * if no carrier
-	 */
 	ND(5, "%s now hwcur %d hwtail %d head %d cur %d tail %d",
 		kring->name, kring->nr_hwcur, kring->nr_hwtail,
 		kring->rhead, kring->rcur, kring->rtail);
 }
-
-
-/*
- * update kring and ring at the end of rxsync
- */
-static inline void
-nm_rxsync_finalize(struct netmap_kring *kring)
-{
-	/* tell userspace that there might be new packets */
-	//struct netmap_ring *ring = kring->ring;
-	ND("head %d cur %d tail %d -> %d", ring->head, ring->cur, ring->tail,
-		kring->nr_hwtail);
-	kring->ring->tail = kring->rtail = kring->nr_hwtail;
-	/* make a copy of the state for next round */
-	kring->rhead = kring->ring->head;
-	kring->rcur = kring->ring->cur;
-}
-
 
 /*
  * ioctl(2) support for the "netmap" device.
@@ -2360,7 +2330,7 @@ netmap_ioctl(struct netmap_priv_d *priv, u_long cmd, caddr_t data, struct thread
 				if (nm_txsync_prologue(kring, ring) >= kring->nkr_num_slots) {
 					netmap_ring_reinit(kring);
 				} else if (kring->nm_sync(kring, NAF_FORCE_RECLAIM) == 0) {
-					nm_txsync_finalize(kring);
+					nm_sync_finalize(kring);
 				}
 				if (netmap_verbose & NM_VERB_TXSYNC)
 					D("post txsync ring %d cur %d hwcur %d",
@@ -2370,7 +2340,7 @@ netmap_ioctl(struct netmap_priv_d *priv, u_long cmd, caddr_t data, struct thread
 				if (nm_rxsync_prologue(kring, ring) >= kring->nkr_num_slots) {
 					netmap_ring_reinit(kring);
 				} else if (kring->nm_sync(kring, NAF_FORCE_READ) == 0) {
-					nm_rxsync_finalize(kring);
+					nm_sync_finalize(kring);
 				}
 				microtime(&ring->ts);
 			}
@@ -2546,7 +2516,7 @@ flush_tx:
 				if (kring->nm_sync(kring, 0))
 					revents |= POLLERR;
 				else
-					nm_txsync_finalize(kring);
+					nm_sync_finalize(kring);
 			}
 
 			/*
@@ -2609,7 +2579,7 @@ do_retry_rx:
 			if (kring->nm_sync(kring, 0))
 				revents |= POLLERR;
 			else
-				nm_rxsync_finalize(kring);
+				nm_sync_finalize(kring);
 			send_down |= (kring->nr_kflags & NR_FORWARD); /* host ring only */
 			if (netmap_no_timestamp == 0 ||
 					ring->flags & NR_TIMESTAMP) {
@@ -2763,7 +2733,7 @@ netmap_detach_common(struct netmap_adapter *na)
  * module unloading.
  */
 static int
-netmap_hw_register(struct netmap_adapter *na, int onoff)
+netmap_hw_reg(struct netmap_adapter *na, int onoff)
 {
 	struct netmap_hw_adapter *hwna =
 		(struct netmap_hw_adapter*)na;
@@ -2824,7 +2794,7 @@ _netmap_attach(struct netmap_adapter *arg, size_t size)
 	hwna->up.na_flags |= NAF_HOST_RINGS | NAF_NATIVE;
 	strncpy(hwna->up.name, ifp->if_xname, sizeof(hwna->up.name));
 	hwna->nm_hw_register = hwna->up.nm_register;
-	hwna->up.nm_register = netmap_hw_register;
+	hwna->up.nm_register = netmap_hw_reg;
 	if (netmap_attach_common(&hwna->up)) {
 		free(hwna, M_DEVBUF);
 		goto fail;
