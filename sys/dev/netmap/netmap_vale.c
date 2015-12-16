@@ -163,7 +163,7 @@ SYSEND;
 
 static int netmap_vp_create(struct nmreq *, struct ifnet *, struct netmap_vp_adapter **);
 static int netmap_vp_reg(struct netmap_adapter *na, int onoff);
-static int netmap_bwrap_register(struct netmap_adapter *, int onoff);
+static int netmap_bwrap_reg(struct netmap_adapter *, int onoff);
 
 /*
  * For each output interface, nm_bdg_q is used to construct a list.
@@ -773,6 +773,11 @@ unlock_exit:
 	return error;
 }
 
+static inline int
+nm_is_bwrap(struct netmap_adapter *na)
+{
+	return na->nm_register == netmap_bwrap_reg;
+}
 
 /* process NETMAP_BDG_DETACH */
 static int
@@ -790,8 +795,13 @@ nm_bdg_ctl_detach(struct nmreq *nmr)
 	if (na == NULL) { /* VALE prefix missing */
 		error = EINVAL;
 		goto unlock_exit;
+	} else if (nm_is_bwrap(na) &&
+		   ((struct netmap_bwrap_adapter *)na)->na_polling_state) {
+		/* Don't detach a NIC with polling */
+		error = EBUSY;
+		netmap_adapter_put(na);
+		goto unlock_exit;
 	}
-
 	if (na->nm_bdg_ctl) {
 		/* remove the port from bridge. The bwrap
 		 * also needs to put the hwna in normal mode
@@ -1068,12 +1078,6 @@ nm_bdg_ctl_polling_stop(struct nmreq *nmr, struct netmap_adapter *na)
 	return 0;
 }
 
-static inline int
-nm_is_bwrap(struct netmap_adapter *na)
-{
-	return na->nm_register == netmap_bwrap_register;
-}
-
 /* Called by either user's context (netmap_ioctl())
  * or external kernel modules (e.g., Openvswitch).
  * Operation is indicated in nmr->nr_cmd.
@@ -1127,7 +1131,9 @@ netmap_bdg_ctl(struct nmreq *nmr, struct netmap_bdg_ops *bdg_ops)
 				break;
 			}
 
-			error = ENOENT;
+			error = 0;
+			nmr->nr_arg1 = b - bridges; /* bridge index */
+			nmr->nr_arg2 = NM_BDG_NOPORT;
 			for (j = 0; j < b->bdg_active_ports; j++) {
 				i = b->bdg_port_index[j];
 				vpna = b->bdg_ports[i];
@@ -1139,10 +1145,7 @@ netmap_bdg_ctl(struct nmreq *nmr, struct netmap_bdg_ops *bdg_ops)
 				 * virtual port and a NIC, respectively
 				 */
 				if (!strcmp(vpna->up.name, name)) {
-					/* bridge index */
-					nmr->nr_arg1 = b - bridges;
 					nmr->nr_arg2 = i; /* port index */
-					error = 0;
 					break;
 				}
 			}
@@ -2268,7 +2271,7 @@ put_out:
 
 /* nm_register callback for bwrap */
 static int
-netmap_bwrap_register(struct netmap_adapter *na, int onoff)
+netmap_bwrap_reg(struct netmap_adapter *na, int onoff)
 {
 	struct netmap_bwrap_adapter *bna =
 		(struct netmap_bwrap_adapter *)na;
@@ -2519,6 +2522,7 @@ netmap_bwrap_bdg_ctl(struct netmap_adapter *na, struct nmreq *nmr, int attach)
 		}
 		bna->na_kpriv = npriv;
 		na->na_flags |= NAF_BUSY;
+		npriv->np_ifp = na->ifp; /* let the priv destructor release the ref */
 	} else {
 		if (na->active_fds == 0) /* not registered */
 			return EINVAL;
@@ -2566,7 +2570,7 @@ netmap_bwrap_attach(const char *nr_name, struct netmap_adapter *hwna)
 		nma_set_ndesc(na, t, nma_get_ndesc(hwna, r));
 	}
 	na->nm_dtor = netmap_bwrap_dtor;
-	na->nm_register = netmap_bwrap_register;
+	na->nm_register = netmap_bwrap_reg;
 	// na->nm_txsync = netmap_bwrap_txsync;
 	// na->nm_rxsync = netmap_bwrap_rxsync;
 	na->nm_config = netmap_bwrap_config;

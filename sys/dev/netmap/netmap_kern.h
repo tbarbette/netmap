@@ -111,14 +111,16 @@ struct netmap_adapter *netmap_getna(if_t ifp);
 #endif
 
 #if __FreeBSD_version >= 1100027
-#define GET_MBUF_REFCNT(m)      ((m)->m_ext.ext_cnt ? *((m)->m_ext.ext_cnt) : -1)
+#define MBUF_REFCNT(m)		((m)->m_ext.ext_cnt ? *((m)->m_ext.ext_cnt) : -1)
 #define SET_MBUF_REFCNT(m, x)   *((m)->m_ext.ext_cnt) = x
 #define PNT_MBUF_REFCNT(m)      ((m)->m_ext.ext_cnt)
 #else
-#define GET_MBUF_REFCNT(m)      ((m)->m_ext.ref_cnt ? *((m)->m_ext.ref_cnt) : -1)
+#define MBUF_REFCNT(m)		((m)->m_ext.ref_cnt ? *((m)->m_ext.ref_cnt) : -1)
 #define SET_MBUF_REFCNT(m, x)   *((m)->m_ext.ref_cnt) = x
 #define PNT_MBUF_REFCNT(m)      ((m)->m_ext.ref_cnt)
 #endif
+
+#define MBUF_QUEUED(m)		1
 
 struct nm_selinfo {
 	struct selinfo si;
@@ -377,6 +379,12 @@ struct netmap_kring {
 #define NKR_FORWARD	0x4		/* (host ring only) there are
 					   packets to forward
 					 */
+
+	uint32_t	nr_mode;
+	uint32_t	nr_pending_mode;
+#define NKR_NETMAP_OFF	0x0
+#define NKR_NETMAP_ON	0x1
+
 	uint32_t	nkr_num_slots;
 
 	/*
@@ -422,9 +430,10 @@ struct netmap_kring {
 	 * store incoming mbufs in a queue that is drained by
 	 * a rxsync.
 	 */
-	struct mbuf **tx_pool;
-	// u_int nr_ntc;		/* Emulation of a next-to-clean RX ring pointer. */
-	struct mbq rx_queue;            /* intercepted rx mbufs. */
+	struct mbuf	**tx_pool;
+	struct mbuf	*tx_event;	/* TX event used as a notification */
+	NM_LOCK_T	tx_event_lock;	/* protects the tx_event mbuf */
+	struct mbq	rx_queue;       /* intercepted rx mbufs. */
 
 	uint32_t	users;		/* existing bindings for this ring */
 
@@ -856,6 +865,10 @@ struct netmap_generic_adapter {	/* emulated device */
 	/* Is the adapter able to use multiple RX slots to scatter
 	 * each packet pushed up by the driver? */
 	int rxsg;
+
+	/* Is the transmission path controlled by a netmap-aware
+	 * device queue (i.e. qdisc on linux)? */
+	int txqdisc;
 };
 #endif  /* WITH_GENERIC */
 
@@ -1105,7 +1118,7 @@ int netmap_ring_reinit(struct netmap_kring *);
 /* default functions to handle rx/tx interrupts */
 int netmap_rx_irq(struct ifnet *, u_int, u_int *);
 #define netmap_tx_irq(_n, _q) netmap_rx_irq(_n, _q, NULL)
-void netmap_common_irq(struct ifnet *, u_int, u_int *work_done);
+int netmap_common_irq(struct netmap_adapter *, u_int, u_int *work_done);
 
 
 #ifdef WITH_VALE
@@ -1146,6 +1159,10 @@ static inline void
 nm_set_native_flags(struct netmap_adapter *na)
 {
 	struct ifnet *ifp = na->ifp;
+
+	if (na->na_refcount > 2) {
+		return;
+	}
 
 	na->na_flags |= NAF_NETMAP_ON;
 #ifdef IFCAP_NETMAP /* or FreeBSD ? */
@@ -1437,6 +1454,7 @@ extern int netmap_flags;
 extern int netmap_generic_mit;
 extern int netmap_generic_ringsize;
 extern int netmap_generic_rings;
+extern int netmap_generic_txqdisc;
 extern int netmap_use_count;
 
 /*
@@ -1701,6 +1719,57 @@ struct netmap_priv_d {
 struct netmap_priv_d *netmap_priv_new(void);
 void netmap_priv_delete(struct netmap_priv_d *);
 
+static inline void kring_get_netmap_mode(struct netmap_priv_d *np, enum txrx ring_txrx, int ring_nr)
+{
+	struct netmap_adapter *na = np->np_na;
+	struct netmap_kring *kring = &NMR(na, ring_txrx)[ring_nr];
+
+	kring->nr_pending_mode = NKR_NETMAP_ON;
+	if (kring->ring_id == nma_get_nrings(na, ring_txrx)) {
+		/*
+		 * If this is a sw ring, just set the mode on (no need to
+		 * wait for netmap_reset())
+		 */
+		kring->nr_mode = NKR_NETMAP_ON;
+	}
+}
+
+static inline void kring_rel_netmap_mode(struct netmap_priv_d *np, enum txrx ring_txrx, int ring_nr)
+{
+	struct netmap_adapter *na = np->np_na;
+	struct netmap_kring *kring = &NMR(na, ring_txrx)[ring_nr];
+
+	/*
+	 * try to release the ring (i.e. put it in normal mode).
+	 * The ring can actually be released only if there are no users
+	 * using it. (users counter is managed by netmap_get_exclusive and
+	 * netmap_rel_exclusive)
+	 */
+	if (kring->users == 0) {
+		kring->nr_pending_mode = NKR_NETMAP_OFF;
+		if (kring->ring_id == nma_get_nrings(na, ring_txrx)) {
+			kring->nr_mode = NKR_NETMAP_OFF;
+		}
+	}
+}
+
+static inline int kring_pending(struct netmap_priv_d *np)
+{
+	struct netmap_adapter *na = np->np_na;
+	enum txrx t;
+	int i;
+
+	for_rx_tx(t) {
+		for (i = np->np_qfirst[t]; i < np->np_qlast[t]; i++) {
+			struct netmap_kring *kring = &NMR(na, t)[i];
+			if (kring->nr_mode != kring->nr_pending_mode) {
+				return 1;
+			}
+		}
+	}
+	return 0;
+}
+
 #ifdef WITH_MONITOR
 
 struct netmap_monitor_adapter {
@@ -1721,9 +1790,8 @@ struct netmap_monitor_adapter {
 int generic_netmap_attach(struct ifnet *ifp);
 void generic_rx_handler(struct ifnet *ifp, struct mbuf *m);;
 
-int nm_os_catch_rx(struct netmap_generic_adapter *na, int intercept);
-/* XXX why the type/argument name disparity with netmap_catch_rx ? */
-void nm_os_catch_tx(struct netmap_generic_adapter *na, int enable);
+int nm_os_catch_rx(struct netmap_generic_adapter *gna, int intercept);
+int nm_os_catch_tx(struct netmap_generic_adapter *gna, int intercept);
 
 /*
  * the generic transmit routine is passed a structure to optionally
@@ -1742,11 +1810,13 @@ struct nm_os_gen_arg {
 	void *addr;	/* payload of current packet */
 	u_int len;	/* packet length */
 	u_int ring_nr;	/* packet length */
+	u_int qevent;   /* in txqdisc mode, place an event on this mbuf */
 };
+
 int nm_os_generic_xmit_frame(struct nm_os_gen_arg *);
 int nm_os_generic_find_num_desc(struct ifnet *ifp, u_int *tx, u_int *rx);
 void nm_os_generic_find_num_queues(struct ifnet *ifp, u_int *txq, u_int *rxq);
-int nm_os_generic_rxsg_supported(void);
+void nm_os_generic_set_features(struct netmap_generic_adapter *gna);
 
 static inline struct ifnet*
 netmap_generic_getifp(struct netmap_generic_adapter *gna)
@@ -1756,6 +1826,8 @@ netmap_generic_getifp(struct netmap_generic_adapter *gna)
 
         return gna->up.up.ifp;
 }
+
+void netmap_generic_irq(struct netmap_adapter *na, u_int q, u_int *work_done);
 
 //#define RATE_GENERIC  /* Enables communication statistics for generic. */
 #ifdef RATE_GENERIC
