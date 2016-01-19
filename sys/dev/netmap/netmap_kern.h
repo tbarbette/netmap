@@ -93,6 +93,8 @@
 #define NM_SELRECORD_T	struct thread
 #define	MBUF_LEN(m)	((m)->m_pkthdr.len)
 #define	MBUF_IFP(m)	((m)->m_pkthdr.rcvif)
+#define MBUF_TXQ(m)	((m)->m_pkthdr.flowid)
+#define MBUF_TRANSMIT(na, ifp, m)	((na)->if_transmit(ifp, m))
 
 #define NM_ATOMIC_T	volatile int	// XXX ?
 /* atomic operations */
@@ -144,6 +146,13 @@ struct hrtimer {
 #define	NM_SELINFO_T	wait_queue_head_t
 #define	MBUF_LEN(m)	((m)->len)
 #define	MBUF_IFP(m)	((m)->dev)
+#define MBUF_TRANSMIT(na, ifp, m)							\
+	({										\
+		/* Avoid infinite recursion with generic. */				\
+		m->priority = NM_MAGIC_PRIORITY_TX;					\
+		(((struct net_device_ops *)(na)->if_transmit)->ndo_start_xmit(m, ifp));	\
+		0;									\
+	})
 
 #define NM_ATOMIC_T	volatile long unsigned int
 
@@ -491,6 +500,21 @@ __declspec(align(64));
 __attribute__((__aligned__(64)));
 #endif
 
+/* return 1 iff the kring needs to be turned on */
+static inline int
+nm_kring_pending_on(struct netmap_kring *kring)
+{
+	return kring->nr_pending_mode == NKR_NETMAP_ON &&
+	       kring->nr_mode == NKR_NETMAP_OFF;
+}
+
+/* return 1 iff the kring needs to be turned off */
+static inline int
+nm_kring_pending_off(struct netmap_kring *kring)
+{
+	return kring->nr_pending_mode == NKR_NETMAP_OFF &&
+	       kring->nr_mode == NKR_NETMAP_ON;
+}
 
 /* return the next index, with wraparound */
 static inline uint32_t
@@ -686,6 +710,8 @@ struct netmap_adapter {
 	 *	For hw devices this is typically a selwakeup(),
 	 *	but for NIC/host ports attached to a switch (or vice-versa)
 	 *	we also need to invoke the 'txsync' code downstream.
+	 *      This callback pointer is actually used only to initialize
+	 *      kring->nm_notify.
 	 */
 	void (*nm_dtor)(struct netmap_adapter *);
 
@@ -979,13 +1005,16 @@ nm_kr_rxspace(struct netmap_kring *k)
 #define nm_kr_txspace(_k) nm_kr_rxspace(_k)
 
 
-/* True if no space in the tx ring. only valid after txsync_prologue */
+/* True if no space in the tx ring, only valid after txsync_prologue */
 static inline int
 nm_kr_txempty(struct netmap_kring *kring)
 {
 	return kring->rcur == kring->nr_hwtail;
 }
 
+/* True if no more completed slots in the rx ring, only valid after
+ * rxsync_prologue */
+#define nm_kr_rxempty(_k)	nm_kr_txempty(_k)
 
 /*
  * protect against multiple threads using the same ring.
@@ -1160,7 +1189,9 @@ nm_set_native_flags(struct netmap_adapter *na)
 {
 	struct ifnet *ifp = na->ifp;
 
-	if (na->na_refcount > 2) {
+	/* We do the setup for intercepting packets only if we are the
+	 * first user of this adapapter. */
+	if (na->active_fds > 0) {
 		return;
 	}
 
@@ -1189,6 +1220,12 @@ static inline void
 nm_clear_native_flags(struct netmap_adapter *na)
 {
 	struct ifnet *ifp = na->ifp;
+
+	/* We undo the setup for intercepting packets only if we are the
+	 * last user of this adapapter. */
+	if (na->active_fds > 0) {
+		return;
+	}
 
 #if defined(__FreeBSD__)
 	ifp->if_transmit = na->if_transmit;
@@ -1719,41 +1756,7 @@ struct netmap_priv_d {
 struct netmap_priv_d *netmap_priv_new(void);
 void netmap_priv_delete(struct netmap_priv_d *);
 
-static inline void kring_get_netmap_mode(struct netmap_priv_d *np, enum txrx ring_txrx, int ring_nr)
-{
-	struct netmap_adapter *na = np->np_na;
-	struct netmap_kring *kring = &NMR(na, ring_txrx)[ring_nr];
-
-	kring->nr_pending_mode = NKR_NETMAP_ON;
-	if (kring->ring_id == nma_get_nrings(na, ring_txrx)) {
-		/*
-		 * If this is a sw ring, just set the mode on (no need to
-		 * wait for netmap_reset())
-		 */
-		kring->nr_mode = NKR_NETMAP_ON;
-	}
-}
-
-static inline void kring_rel_netmap_mode(struct netmap_priv_d *np, enum txrx ring_txrx, int ring_nr)
-{
-	struct netmap_adapter *na = np->np_na;
-	struct netmap_kring *kring = &NMR(na, ring_txrx)[ring_nr];
-
-	/*
-	 * try to release the ring (i.e. put it in normal mode).
-	 * The ring can actually be released only if there are no users
-	 * using it. (users counter is managed by netmap_get_exclusive and
-	 * netmap_rel_exclusive)
-	 */
-	if (kring->users == 0) {
-		kring->nr_pending_mode = NKR_NETMAP_OFF;
-		if (kring->ring_id == nma_get_nrings(na, ring_txrx)) {
-			kring->nr_mode = NKR_NETMAP_OFF;
-		}
-	}
-}
-
-static inline int kring_pending(struct netmap_priv_d *np)
+static inline int nm_kring_pending(struct netmap_priv_d *np)
 {
 	struct netmap_adapter *na = np->np_na;
 	enum txrx t;
@@ -1788,7 +1791,7 @@ struct netmap_monitor_adapter {
  * native netmap support.
  */
 int generic_netmap_attach(struct ifnet *ifp);
-void generic_rx_handler(struct ifnet *ifp, struct mbuf *m);;
+int generic_rx_handler(struct ifnet *ifp, struct mbuf *m);;
 
 int nm_os_catch_rx(struct netmap_generic_adapter *gna, int intercept);
 int nm_os_catch_tx(struct netmap_generic_adapter *gna, int intercept);
@@ -2007,7 +2010,7 @@ nm_ptnetmap_host_on(struct netmap_adapter *na)
 	((nmr)->nr_flags & (NR_PTNETMAP_HOST) ? EOPNOTSUPP : 0)
 #define ptnetmap_ctl(_1, _2)   EINVAL
 #define nm_ptnetmap_host_on(_1)   EINVAL
-#endif /* WITH_PTNETMAP_HOST */
+#endif /* !WITH_PTNETMAP_HOST */
 
 #ifdef WITH_PTNETMAP_GUEST
 /* ptnetmap GUEST routines */
@@ -2025,8 +2028,8 @@ struct netmap_pt_guest_adapter {
 };
 
 int netmap_pt_guest_attach(struct netmap_adapter *, struct netmap_pt_guest_ops *);
-int netmap_pt_guest_txsync(struct netmap_kring *kring, int flags, int *notify);
-int netmap_pt_guest_rxsync(struct netmap_kring *kring, int flags, int *notify);
+bool netmap_pt_guest_txsync(struct netmap_kring *kring, int flags);
+bool netmap_pt_guest_rxsync(struct netmap_kring *kring, int flags);
 #endif /* WITH_PTNETMAP_GUEST */
 
 #endif /* _NET_NETMAP_KERN_H_ */

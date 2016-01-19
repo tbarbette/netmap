@@ -1509,7 +1509,7 @@ receiver_body(void *data)
 	int i;
 	struct my_ctrs cur;
 
-	cur.pkts = cur.bytes = cur.events = 0;
+	cur.pkts = cur.bytes = cur.events = cur.min_space = 0;
 	cur.t.tv_usec = cur.t.tv_sec = 0; //  unused, just silence the compiler
 
 	if (setaffinity(targ->thread, targ->affinity))
@@ -2276,8 +2276,8 @@ D("running on %d cpus (have %d)", g.cpus, i);
 		    req->nr_arg2);
 		for (i = 0; i <= req->nr_tx_rings; i++) {
 			struct netmap_ring *ring = NETMAP_TXRING(nifp, i);
-			D("   TX%d at 0x%lx slots %d", i,
-			    (char *)ring - (char *)nifp, ring->num_slots);
+			D("   TX%d at 0x%p slots %d", i,
+			    (void *)((char *)ring - (char *)nifp), ring->num_slots);
 		}
 		for (i = 0; i <= req->nr_rx_rings; i++) {
 			struct netmap_ring *ring = NETMAP_RXRING(nifp, i);
