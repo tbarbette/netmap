@@ -38,6 +38,17 @@
 #include "netmap_linux_config.h"
 
 void
+nm_os_selinfo_init(NM_SELINFO_T *si)
+{
+	init_waitqueue_head(si);
+}
+
+void
+nm_os_selinfo_uninit(NM_SELINFO_T *si)
+{
+}
+
+void
 nm_os_ifnet_lock(void)
 {
 	rtnl_lock();
@@ -47,6 +58,18 @@ void
 nm_os_ifnet_unlock(void)
 {
 	rtnl_unlock();
+}
+
+void
+nm_os_get_module(void)
+{
+	__module_get(THIS_MODULE);
+}
+
+void
+nm_os_put_module(void)
+{
+	module_put(THIS_MODULE);
 }
 
 /* Register for a notification on device removal */
@@ -283,45 +306,58 @@ nm_os_mitigation_cleanup(struct nm_generic_mit *mit)
  * stolen.
  */
 #ifdef NETMAP_LINUX_HAVE_RX_REGISTER
-#ifdef NETMAP_LINUX_HAVE_RX_HANDLER_RESULT
-static rx_handler_result_t linux_generic_rx_handler(struct mbuf **pm)
+enum {
+	NM_RX_HANDLER_STOLEN,
+	NM_RX_HANDLER_PASS,
+};
+
+static inline int
+linux_generic_rx_handler_common(struct mbuf *m)
 {
 	int stolen;
 
 	/* If we were called by NM_SEND_UP(), we want to pass the mbuf
 	   to network stack. We detect this situation looking at the
 	   priority field. */
-	if ((*pm)->priority == NM_MAGIC_PRIORITY_RX)
-		return RX_HANDLER_PASS;
+	if (m->priority == NM_MAGIC_PRIORITY_RX) {
+		return NM_RX_HANDLER_PASS;
+	}
 
 	/* When we intercept a sk_buff coming from the driver, it happens that
 	   skb->data points to the IP header, e.g. the ethernet header has
 	   already been pulled. Since we want the netmap rings to contain the
 	   full ethernet header, we push it back, so that the RX ring reader
 	   can see it. */
-	skb_push(*pm, 14);
+	skb_push(m, ETH_HLEN);
 
 	/* Possibly steal the mbuf and notify the pollers for a new RX
 	 * packet. */
-	stolen = generic_rx_handler((*pm)->dev, *pm);
+	stolen = generic_rx_handler(m->dev, m);
 	if (stolen) {
-		return RX_HANDLER_CONSUMED;
+		return NM_RX_HANDLER_STOLEN;
 	}
 
-	skb_pull(*pm, 14);
+	skb_pull(m, ETH_HLEN);
 
-	return RX_HANDLER_PASS;
+	return NM_RX_HANDLER_PASS;
+}
+
+#ifdef NETMAP_LINUX_HAVE_RX_HANDLER_RESULT
+static rx_handler_result_t
+linux_generic_rx_handler(struct mbuf **pm)
+{
+	int ret = linux_generic_rx_handler_common(*pm);
+
+	return likely(ret == NM_RX_HANDLER_STOLEN) ? RX_HANDLER_CONSUMED :
+						     RX_HANDLER_PASS;
 }
 #else /* ! HAVE_RX_HANDLER_RESULT */
-static struct sk_buff *linux_generic_rx_handler(struct mbuf *m)
+static struct sk_buff *
+linux_generic_rx_handler(struct mbuf *m)
 {
-	int stolen = generic_rx_handler(m->dev, m);
+	int ret = linux_generic_rx_handler_common(m);
 
-	if (stolen) {
-		return NULL;
-	}
-
-	return m;
+	return likely(ret == NM_RX_HANDLER_STOLEN) ? NULL : m;
 }
 #endif /* HAVE_RX_HANDLER_RESULT */
 #endif /* HAVE_RX_REGISTER */
@@ -645,20 +681,32 @@ nm_os_catch_tx(struct netmap_generic_adapter *gna, int intercept)
 int
 nm_os_generic_xmit_frame(struct nm_os_gen_arg *a)
 {
-	struct sk_buff *m = a->m;
+	struct mbuf *m = a->m;
 	u_int len = a->len;
 	netdev_tx_t ret;
 
-	/* Empty the sk_buff. */
+	/* Empty the mbuf. */
 	if (unlikely(skb_headroom(m)))
 		skb_push(m, skb_headroom(m));
 	skb_trim(m, 0);
 
-	/* TODO Support the slot flags (NS_MOREFRAG, NS_INDIRECT). */
+	/* Copy a netmap buffer into the mbuf.
+	 * TODO Support the slot flags (NS_MOREFRAG, NS_INDIRECT). */
 	skb_copy_to_linear_data(m, a->addr, len); // skb_store_bits(m, 0, addr, len);
 	skb_put(m, len);
+
+	/* Hold a reference on this, we are going to recycle mbufs as
+	 * much as possible. */
 	NM_ATOMIC_INC(&m->users);
+
+	/* On linux m->dev is not reliable, since it can be changed by the
+	 * ndo_start_xmit() callback. This happens, for instance, with veth
+	 * and bridge drivers. For this reason, the nm_os_generic_xmit_frame()
+	 * implementation for linux stores a copy of m->dev into the
+	 * destructor_arg field. */
 	m->dev = a->ifp;
+	skb_shinfo(m)->destructor_arg = m->dev;
+
 	/* Tell generic_ndo_start_xmit() to pass this mbuf to the driver. */
 	skb_set_queue_mapping(m, a->ring_nr);
 	m->priority = a->qevent ? NM_MAGIC_PRIORITY_TXQE : NM_MAGIC_PRIORITY_TX;
@@ -1076,7 +1124,7 @@ static int netmap_backend_nm_notify(struct netmap_adapter *na,
 					POLLRDNORM | POLLRDBAND);
 	}
 
-	return 0;
+	return NM_IRQ_COMPLETED;
 }
 
 /* Called by an external module (the v1000 frontend) which wants to
@@ -1187,7 +1235,7 @@ static int netmap_common_sendmsg(struct netmap_adapter *na, struct msghdr *m,
     /* Grab the netmap ring normally used from userspace. */
     kring = &na->tx_rings[0];
     ring = kring->ring;
-    nm_buf_size = ring->nr_buf_size;
+    nm_buf_size = NETMAP_BUF_SIZE(na);
 
     i = last = ring->cur;
     avail = ring->tail + ring->num_slots - ring->cur;
@@ -1266,7 +1314,6 @@ EXPORT_SYMBOL(netmap_backend_sendmsg);
 static inline int netmap_common_peek_head_len(struct netmap_adapter *na)
 {
         /* Here we assume to have a virtual port. */
-        struct netmap_vp_adapter *vpna = (struct netmap_vp_adapter *)na;
 	struct netmap_kring *kring = &na->rx_rings[0];
         struct netmap_ring *ring = kring->ring;
 	u_int i;
@@ -1294,8 +1341,8 @@ static inline int netmap_common_peek_head_len(struct netmap_adapter *na)
 
         /* The v1000 frontend assumes that the peek_head_len() callback
            doesn't count the bytes of the virtio-net-header. */
-        if (likely(ret >= vpna->virt_hdr_len)) {
-            ret -= vpna->virt_hdr_len;
+        if (likely(ret >= na->virt_hdr_len)) {
+            ret -= na->virt_hdr_len;
         }
 
 	return ret;
@@ -1563,7 +1610,7 @@ static int netmap_socket_nm_notify(struct netmap_adapter *na,
 					POLLRDNORM | POLLRDBAND);
 	}
 
-	return 0;
+	return NM_IRQ_COMPLETED;
 }
 
 static struct netmap_sock *netmap_sock_setup(struct netmap_adapter *na, struct file *filp)
@@ -1849,7 +1896,7 @@ struct nm_kthread_ctx {
     nm_kthread_worker_fn_t worker_fn;
     void *worker_private;
 
-    /* integer to manage multiple worker contexts (e.g., RX or TX in ptnetmap) */
+    /* integer to manage multiple worker contexts */
     long type;
 };
 
@@ -1992,7 +2039,7 @@ nm_kthread_close_files(struct nm_kthread *nmk)
 }
 
 static int
-nm_kthread_open_files(struct nm_kthread *nmk, struct nm_kth_event_cfg *ring_cfg)
+nm_kthread_open_files(struct nm_kthread *nmk, struct ptnet_ring_cfg *ring_cfg)
 {
     struct file *file;
     struct nm_kthread_ctx *wctx = &nmk->worker_ctx;
@@ -2111,8 +2158,8 @@ nm_os_kthread_start(struct nm_kthread *nmk)
     }
 
     /* ToDo Make this able to pass arbitrary string (e.g., for 'nm_') from nmk */
-    snprintf(name, sizeof(name), "nm_kthread-%ld-%d", nmk->worker_ctx.type,
-	     current->pid);
+    snprintf(name, sizeof(name), "nmkth:%d:%ld", current->pid,
+	     nmk->worker_ctx.type);
     nmk->worker = kthread_create(nm_kthread_worker, nmk, name);
     if (IS_ERR(nmk->worker)) {
 	error = -PTR_ERR(nmk->worker);
@@ -2217,7 +2264,8 @@ struct ptnetmap_memdev
  * of the netmap memory mapped in the guest.
  */
 int
-nm_os_pt_memdev_iomap(struct ptnetmap_memdev *ptn_dev, vm_paddr_t *nm_paddr, void **nm_addr)
+nm_os_pt_memdev_iomap(struct ptnetmap_memdev *ptn_dev, vm_paddr_t *nm_paddr,
+                      void **nm_addr)
 {
     struct pci_dev *pdev = ptn_dev->pdev;
     uint32_t mem_size;
@@ -2333,10 +2381,7 @@ ptn_memdev_remove(struct pci_dev *pdev)
         netmap_mem_put(ptn_dev->nm_mem);
         ptn_dev->nm_mem = NULL;
     }
-    if (ptn_dev->pci_mem) {
-        iounmap(ptn_dev->pci_mem);
-        ptn_dev->pci_mem = NULL;
-    }
+    nm_os_pt_memdev_iounmap(ptn_dev);
     pci_set_drvdata(pdev, NULL);
     iounmap(ptn_dev->pci_io);
     pci_release_selected_regions(pdev, ptn_dev->bars);
@@ -2384,9 +2429,15 @@ nm_os_pt_memdev_uninit(void)
 
     D("ptn_memdev_driver exit");
 }
+
+int ptnet_init(void);
+void ptnet_fini(void);
+
 #else /* !WITH_PTNETMAP_GUEST */
-#define nm_os_pt_memdev_init()        0
+#define nm_os_pt_memdev_init()		0
 #define nm_os_pt_memdev_uninit()
+#define ptnet_init()			0
+#define ptnet_fini()
 #endif /* WITH_PTNETMAP_GUEST */
 
 
@@ -2402,18 +2453,31 @@ struct miscdevice netmap_cdevsw = { /* same name as FreeBSD */
 
 static int linux_netmap_init(void)
 {
-        int err;
-        /* Errors have negative values on linux. */
-        err = -netmap_init();
-        if (err)
-            return err;
+	int err;
+	/* Errors have negative values on linux. */
+	err = -netmap_init();
+	if (err) {
+		return err;
+	}
 
-	return nm_os_pt_memdev_init();
+	err = nm_os_pt_memdev_init();
+	if (err) {
+		return err;
+	}
+
+	err = ptnet_init();
+	if (err) {
+		nm_os_pt_memdev_uninit();
+		return err;
+	}
+
+	return 0;
 }
 
 
 static void linux_netmap_fini(void)
 {
+	ptnet_fini();
         nm_os_pt_memdev_uninit();
         netmap_fini();
 }
@@ -2490,7 +2554,7 @@ linux_nm_vi_setup(struct ifnet *dev)
 #ifdef NETMAP_LINUX_HAVE_HW_FEATURES
 	dev->hw_features = dev->features & ~NETIF_F_LLTX;
 #endif
-#ifdef NETMA_LINUX_HAVE_ADDR_RANDOM
+#ifdef NETMAP_LINUX_HAVE_ADDR_RANDOM
 	eth_hw_addr_random(dev);
 #endif
 }
@@ -2551,6 +2615,7 @@ EXPORT_SYMBOL(netmap_attach);		/* driver attach routines */
 EXPORT_SYMBOL(netmap_pt_guest_attach);	/* ptnetmap driver attach routines */
 EXPORT_SYMBOL(netmap_pt_guest_rxsync);	/* ptnetmap generic rxsync */
 EXPORT_SYMBOL(netmap_pt_guest_txsync);	/* ptnetmap generic txsync */
+EXPORT_SYMBOL(netmap_mem_pt_guest_ifp_del); /* unlink passthrough interface */
 #endif /* WITH_PTNETMAP_GUEST */
 EXPORT_SYMBOL(netmap_detach);		/* driver detach routines */
 EXPORT_SYMBOL(netmap_ring_reinit);	/* ring init on error */

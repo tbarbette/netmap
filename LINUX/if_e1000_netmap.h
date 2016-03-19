@@ -393,7 +393,7 @@ e1000_ptnetmap_txsync(struct netmap_kring *kring, int flags)
 
         IFRATE(adapter->rate_ctx.new.tx_sync++);
 
-	notify = netmap_pt_guest_txsync(kring, flags);
+	notify = netmap_pt_guest_txsync(&adapter->csb.tx_ring, kring, flags);
 	if (notify)
 		writel(0, adapter->hw.hw_addr + txr->tdt);
 
@@ -414,7 +414,7 @@ e1000_ptnetmap_rxsync(struct netmap_kring *kring, int flags)
 
         IFRATE(adapter->rate_ctx.new.rx_sync++);
 
-	notify = netmap_pt_guest_rxsync(kring, flags);
+	notify = netmap_pt_guest_rxsync(&adapter->csb.rx_ring, kring, flags);
 	if (notify)
 		writel(0, hw->hw_addr + rxr->rdt);
 
@@ -488,18 +488,10 @@ e1000_ptnetmap_bdg_attach(const char *bdg_name, struct netmap_adapter *na)
 	return EOPNOTSUPP;
 }
 
-/*
- * CSB (Communication Status Block) setup
- * CSB is already allocated in e1000 (paravirt).
- */
 static void
-e1000_ptnetmap_setup_csb(struct SOFTC_T *adapter)
+e1000_ptnetmap_dtor(struct netmap_adapter *na)
 {
-	struct ifnet *ifp = adapter->netdev;
-	struct netmap_pt_guest_adapter* ptna =
-		(struct netmap_pt_guest_adapter *)NA(ifp);
-
-	ptna->csb = adapter->csb;
+	netmap_mem_pt_guest_ifp_del(na->nm_mem, na->ifp);
 }
 
 /* Send command to the host through PTCTL register. */
@@ -534,9 +526,6 @@ e1000_ptnetmap_features(struct SOFTC_T *adapter)
 	return features;
 }
 
-static struct netmap_pt_guest_ops e1000_ptnetmap_ops = {
-	.nm_ptctl = e1000_ptnetmap_ptctl,
-};
 #elif defined (CONFIG_E1000_NETMAP_PT)
 #warning "e1000 supports ptnetmap but netmap does not support it"
 #warning "(configure netmap with ptnetmap support)"
@@ -567,13 +556,25 @@ e1000_netmap_attach(struct SOFTC_T *adapter)
 	if (paravirtual &&
 		(adapter->pdev->subsystem_device == E1000_PARAVIRT_SUBDEV) &&
 	        (e1000_ptnetmap_features(adapter) & NET_PTN_FEATURES_BASE)) {
+		int err;
+
 		na.nm_config = e1000_ptnetmap_config;
 		na.nm_register = e1000_ptnetmap_reg;
 		na.nm_txsync = e1000_ptnetmap_txsync;
 		na.nm_rxsync = e1000_ptnetmap_rxsync;
 		na.nm_bdg_attach = e1000_ptnetmap_bdg_attach; /* XXX */
-		netmap_pt_guest_attach(&na, &e1000_ptnetmap_ops);
-		e1000_ptnetmap_setup_csb(adapter);
+		na.nm_dtor = e1000_ptnetmap_dtor;
+
+		/* Ask the device to fill in some configuration fields. Here we
+		 * just need nifp_offset. */
+		err = e1000_ptnetmap_ptctl(na.ifp, NET_PARAVIRT_PTCTL_CONFIG);
+		if (err) {
+			D("Failed to get nifp_offset from passthrough device");
+			return;
+		}
+
+		netmap_pt_guest_attach(&na, adapter->csb, adapter->csb->nifp_offset,
+				       e1000_ptnetmap_ptctl);
 	} else
 #endif /* CONFIG_E1000_NETMAP_PT && WITH_PTNETMAP_GUEST */
 	netmap_attach(&na);
