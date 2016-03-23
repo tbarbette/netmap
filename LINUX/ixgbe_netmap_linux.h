@@ -210,7 +210,7 @@ ixgbe_netmap_txsync(struct netmap_kring *kring, int flags)
 
 			/* device-specific */
 			union ixgbe_adv_tx_desc *curr = NM_IXGBE_TX_DESC(txr, nic_i);
-			int flags = (slot->flags & NS_REPORT ||
+			int flags = ((slot->flags & NS_REPORT) ||
 				nic_i == 0 || nic_i == report_frequency) ?
 				IXGBE_TXD_CMD_RS : 0;
 
